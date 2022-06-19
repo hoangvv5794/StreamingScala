@@ -2,7 +2,7 @@ package com.viettel.vtcc.spark.process
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
-import com.viettel.vtcc.spark.model.{ElasticObject, StorageCount, StorageStock, TelegramObject}
+import com.viettel.vtcc.spark.model.{ElasticObject, ForumObject, StorageCount, StorageStock}
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkConf
@@ -17,7 +17,7 @@ import java.util.Date
 import javax.management.timer.Timer
 import scala.io.Source
 
-object StreamTelegram extends Serializable {
+object StreamForum extends Serializable {
   def main(args: Array[String]): Unit = {
     Logger.getLogger("org").setLevel(Level.ERROR)
     Logger.getLogger("akka").setLevel(Level.ERROR)
@@ -26,14 +26,14 @@ object StreamTelegram extends Serializable {
       "bootstrap.servers" -> "localhost:29092",
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "telegram_data",
+      "group.id" -> "forum_data",
       "auto.offset.reset" -> "latest",
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
 
     // create streaming context
     val conf = new SparkConf()
-      .setAppName("TelegramStream")
+      .setAppName("ForumStream")
       .setMaster("local[*]")
     conf.set("es.index.auto.create", "true")
     conf.set("es.nodes", "localhost")
@@ -54,7 +54,7 @@ object StreamTelegram extends Serializable {
     println("Load map stock id and broad name " + stock_map.size)
     source.close()
 
-    val topics = Array("telegram_data")
+    val topics = Array("forum_data")
     val stream = KafkaUtils.createDirectStream[String, String](
       ssc,
       PreferConsistent,
@@ -62,34 +62,39 @@ object StreamTelegram extends Serializable {
     )
 
 
+
+    // print data to logs
+
     stream.map(record => (record.key, record.value)).map(record => {
       val mapper = new ObjectMapper()
       mapper.registerModule(DefaultScalaModule)
-      mapper.readValue(record._2, classOf[TelegramObject])
+      mapper.readValue(record._2, classOf[ForumObject])
     }
-    ).print()
+    )
+      .map(forum_object => convertObject(forum_object))
+      .print()
 
-    // write raw data to ES
+    // write data to ES
 
     stream.map(record => {
       val mapper = new ObjectMapper()
       mapper.registerModule(DefaultScalaModule)
-      mapper.readValue(record.value(), classOf[TelegramObject])
+      mapper.readValue(record.value(), classOf[ForumObject])
     })
-      .map(telegram => convertObject(telegram))
-      .map(telegram => addCurrentTimeToObject(telegram))
-      .foreachRDD(rdd => {
-        rdd.saveToEs("raw_data/data")
-      })
+      .map(forum_object => convertObject(forum_object))
+      .map(telegram => addCurrentTimeToObject(telegram)).foreachRDD(rdd => {
+      rdd.saveToEs("raw_data/data")
+    })
+
 
     // compute number process message contain stock_id
 
     stream.map(record => {
       val mapper = new ObjectMapper()
       mapper.registerModule(DefaultScalaModule)
-      mapper.readValue(record.value, classOf[TelegramObject])
+      mapper.readValue(record.value, classOf[ForumObject])
     })
-      .map(telegram => convertObject(telegram))
+      .map(forum_object => convertObject(forum_object))
       .map(telegram_object => (telegram_object.id, telegram_object.text.split(" ")))
       .flatMap { case (key, values) => values.map((key, _)) }
       .filter(pair => stock_map.contains(pair._2))
@@ -101,7 +106,8 @@ object StreamTelegram extends Serializable {
     stream.map(record => {
       val mapper = new ObjectMapper()
       mapper.registerModule(DefaultScalaModule)
-      mapper.readValue(record.value(), classOf[TelegramObject]).text
+      mapper.readValue(record.value(), classOf[ForumObject])
+        .content
     })
       .flatMap(text => text.split(" "))
       .filter(text => stock_map.contains(text))
@@ -114,10 +120,10 @@ object StreamTelegram extends Serializable {
     ssc.awaitTermination()
   }
 
-  def convertObject(x: TelegramObject): ElasticObject = {
+  def convertObject(x: ForumObject): ElasticObject = {
     val format_time = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
     val current_date = format_time.format(new Date(System.currentTimeMillis() - 7 * Timer.ONE_HOUR))
-    ElasticObject(id = x.id, date = current_date, text = x.text, from = x.from)
+    ElasticObject(id = x.id, date = current_date, text = x.content, from = x.title)
   }
 
   def addCurrentTimeToObject(x: ElasticObject): ElasticObject = {
